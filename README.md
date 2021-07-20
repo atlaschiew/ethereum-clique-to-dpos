@@ -10,6 +10,7 @@
 
 ## 目录
 
+* [DPOS是什么？CLIQUE又是什么？](#what-is)
 * [设计思路](#design-rationale)
 * [安装部署](#deployment)
 * [源码分析](#coding-study)
@@ -19,7 +20,10 @@
   * [Transaction Generation](#transaction-generation)
   * [Fork Handling](#fork-handling)
   * [Address](#address)
-  
+ 
+ 
+## DPOS是什么？CLIQUE又是什么？
+
 ## 设计思路
 > 本项目采用 [geth v1.9.25](https://github.com/ethereum/go-ethereum/tree/v1.9.25) 。
 
