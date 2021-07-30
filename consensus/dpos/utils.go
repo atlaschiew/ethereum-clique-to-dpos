@@ -5,6 +5,7 @@ import (
 	"io"
 	"bytes"
 	_"fmt"
+	"math"
 	"encoding/binary"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -13,6 +14,55 @@ import (
 	"golang.org/x/crypto/sha3"
 	lru "github.com/hashicorp/golang-lru"
 )
+
+
+func parseEpochExtra(header *types.Header) ([]common.Address, []*Proposal, [][]ElectedDelegator) {
+	extras := unserialize(header.Extra)
+	
+	//extract signer
+	signers := make([]common.Address, len(extras[1])/common.AddressLength)
+	
+	for i := 0; i < len(signers); i++ {
+		copy(signers[i][:], extras[1][i*common.AddressLength:])
+	}
+	
+	//extract proposal
+	proposalCnt := len(extras[2])/common.HashLength
+	proposals := make([]*Proposal, 0)
+	
+	for i := 0; i < proposalCnt; i++ {
+		proposal := &Proposal{}
+		proposal.fromBytes(common.BytesToHash(extras[2][i*common.HashLength:(i+1)*common.HashLength]))
+		proposals = append(proposals, proposal)
+	}
+	
+	//extract delegator
+	portionLen := 4
+	segments := unserialize(extras[3])
+	
+	delegatorss := make([][]ElectedDelegator,0)
+	for _, segment := range segments {
+		
+		segmentLen := common.AddressLength+portionLen
+		delegatorCnt := len(segment)/segmentLen
+		delegators := make([]ElectedDelegator,0)
+		for i :=0; i < delegatorCnt; i++ {
+			
+			delegator := segment[i*segmentLen:(i+1)*segmentLen]
+			address := common.BytesToAddress(delegator[:common.AddressLength])
+			portion := math.Float32frombits(binary.BigEndian.Uint32(delegator[common.AddressLength:]))
+			
+			delegators = append(delegators, ElectedDelegator{address, portion})
+		}
+		
+		delegatorss = append(delegatorss, delegators)
+			
+	}
+	
+	return signers, proposals, delegatorss
+	
+}	
+
 
 func RLP(header *types.Header) []byte {
 	b := new(bytes.Buffer)

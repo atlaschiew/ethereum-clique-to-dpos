@@ -249,15 +249,10 @@ var (
 	// adding flags to the config to also have to set these fields.
 	AllCliqueProtocolChanges = &ChainConfig{big.NewInt(1337), big.NewInt(0), nil, false, big.NewInt(0), common.Hash{}, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, nil, nil, &CliqueConfig{Period: 0, Epoch: 30000},nil}
 	
-	/*
-	<atlas date="2021-06-29 09:43:00" type="append" seq="5">
-	测试用途
-	*/
+	
+	//测试用途
 	AllDposProtocolChanges = &ChainConfig{big.NewInt(1337), big.NewInt(0), nil, false, big.NewInt(0), common.Hash{}, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, nil, nil, nil, &DposConfig{SlotInterval: 10, EpochInterval: 86400}}
-	/*
-	</atlas>
-	*/
-
+	
 	TestChainConfig = &ChainConfig{big.NewInt(1), big.NewInt(0), nil, false, big.NewInt(0), common.Hash{}, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, nil, new(EthashConfig), nil,nil}
 	TestRules       = TestChainConfig.Rules(new(big.Int))
 )
@@ -336,14 +331,9 @@ type ChainConfig struct {
 	// Various consensus engines
 	Ethash *EthashConfig `json:"ethash,omitempty"`
 	Clique *CliqueConfig `json:"clique,omitempty"`
-	/*
-	<atlas date="2021-06-29 09:28:00" type="append" seq="2">
-	ChainConfig (链配置), 储存在创世块, 这里新加个Dpos字段
-	*/
+	
+	//ChainConfig (链配置), 储存在创世块, 这里新加个Dpos字段
 	Dpos *DposConfig `json:"dpos,omitempty"`
-	/*
-	</atlas>
-	*/
 	
 }
 
@@ -366,10 +356,7 @@ func (c *CliqueConfig) String() string {
 	return "clique"
 }
 
-// QuotraConfig is the consensus engine configs for DPOS based sealing.
-/*
-<atlas date="2021-06-29 09:32:00" type="append" seq="3">
-*/
+// DposConfig is the consensus engine configs for DPOS based sealing.
 type DposConfig struct {
 	SlotInterval uint64 `json:"slotInterval"`   //也叫slot,是区块与区块之间的时间差
 	EpochInterval  uint64 `json:"epochInterval"`  //Epoch是时代差，一个时代等于默认86400秒，每个新时代将重选出块人组合
@@ -380,9 +367,6 @@ type DposConfig struct {
 func (c *DposConfig) String() string {
 	return "dpos"
 }
-/*
-</atlas>
-*/
 
 // String implements the fmt.Stringer interface.
 func (c *ChainConfig) String() string {
@@ -392,14 +376,8 @@ func (c *ChainConfig) String() string {
 		engine = c.Ethash
 	case c.Clique != nil:
 		engine = c.Clique
-	/*
-	<atlas date="2021-06-29 09:38:00" type="append" seq="4">
-	*/
 	case c.Dpos != nil:
 		engine = c.Dpos
-	/*
-	</atlas>
-	*/
 	default:
 		engine = "unknown"
 	}

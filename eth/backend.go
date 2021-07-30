@@ -30,7 +30,6 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/clique"
-	//<atlas date="2021-06-29 09:49:00" type="append" seq="6"/>
 	"github.com/ethereum/go-ethereum/consensus/dpos"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
@@ -246,20 +245,11 @@ func makeExtraData(extra []byte) []byte {
 // CreateConsensusEngine creates the required type of consensus engine instance for an Ethereum service
 func CreateConsensusEngine(stack *node.Node, chainConfig *params.ChainConfig, config *ethash.Config, notify []string, noverify bool, db ethdb.Database) consensus.Engine {
 	
-	/*
-	<atlas date="2021-06-29 09:11:00" type="append" seq="1">
-		共识引擎设置成dpos
-	*/
 	
+	//共识引擎设置成dpos
 	if chainConfig.Dpos != nil {
 		return dpos.New(chainConfig.Dpos, db)
 	}
-	
-	
-	/*
-		下一步，修改 params/config.go
-	</atlas>
-	*/
 	
 	// If proof-of-authority is requested, set it up
 	if chainConfig.Clique != nil {
@@ -531,7 +521,9 @@ func (s *Ethereum) IsListening() bool                  { return true } // Always
 func (s *Ethereum) EthVersion() int                    { return int(ProtocolVersions[0]) }
 func (s *Ethereum) NetVersion() uint64                 { return s.networkID }
 func (s *Ethereum) Downloader() *downloader.Downloader { return s.protocolManager.downloader }
-func (s *Ethereum) Synced() bool                       { return atomic.LoadUint32(&s.protocolManager.acceptTxs) == 1 }
+func (s *Ethereum) Synced() bool                       { 
+	return atomic.LoadUint32(&s.protocolManager.acceptTxs) == 1
+}
 func (s *Ethereum) ArchiveMode() bool                  { return s.config.NoPruning }
 func (s *Ethereum) BloomIndexer() *core.ChainIndexer   { return s.bloomIndexer }
 

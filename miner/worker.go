@@ -23,7 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
+    _ "fmt"
 	mapset "github.com/deckarep/golang-set"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -365,11 +365,13 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 	for {
 		select {
 		case <-w.startCh:
+			
 			clearPending(w.chain.CurrentBlock().NumberU64())
 			timestamp = time.Now().Unix()
 			commit(false, commitInterruptNewHead)
 
 		case head := <-w.chainHeadCh:
+		
 			clearPending(head.Block.NumberU64())
 			timestamp = time.Now().Unix()
 			commit(false, commitInterruptNewHead)
@@ -379,12 +381,19 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			// higher priced transactions. Disable this overhead for pending blocks.
 			if w.isRunning() {
 				
+				/*
+				如果不是clique引擎或clique.period > 0 (不是dev模式） 和发现新tx,那就调用commit
+				注意, period >0 clique是可以接受空tx
+				*/
 				if w.chainConfig.Clique == nil || w.chainConfig.Clique.Period > 0 {
 					// Short circuit if no new transaction arrives.
 					if atomic.LoadInt32(&w.newTxs) == 0 {
 						timer.Reset(recommit)
 						continue
 					}
+					
+					
+					
 					commit(true, commitInterruptResubmit)
 				}
 			}
@@ -508,6 +517,11 @@ func (w *worker) mainLoop() {
 				// submit mining work here since all empty submission will be rejected
 				// by clique. Of course the advance sealing(empty submission) is disabled.
 				
+				/*
+				当通道<-w.txsCh收到新tx, 当下共识设置又是0 period clique (dev模式)，那么调用w.commitNewWork(...)开启挖矿。
+				
+				注意, period 0 clique是不接受空tx, clique.Seal() @ consensus/clique/clique.go里会做检查
+				*/
 				if w.chainConfig.Clique != nil && w.chainConfig.Clique.Period == 0 {
 					w.commitNewWork(nil, true, time.Now().Unix())
 				}

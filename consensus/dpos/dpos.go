@@ -24,7 +24,7 @@ package dpos
 import (
 	"bytes"
 	"errors"
-	
+	"math"
 	"math/big"
 	"math/rand"
 	"sync"
@@ -37,7 +37,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	_ "github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/core/state"
-	"github.com/ethereum/go-ethereum/core"
+	_ "github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -79,7 +79,7 @@ var (
 
 var (
 	//区块不存在于本地
-	errUnknownBlock = errors.New("unknown block")
+	errUnknownBlock = errors.New("Unknown block")
 
 	//epoch区块不允许投票
 	errInvalidEpochVoting = errors.New("Voting does not allow in epoch block")
@@ -94,43 +94,53 @@ var (
 	errInvalidEpochExtraProposal = errors.New("Invalid proposals contain in epoch block's extra")
 
 	//nonces值只能是0x00..0或0xff..f
-	errInvalidVote = errors.New("vote nonce not 0x00..0 or 0xff..f")
+	errInvalidVote = errors.New("Vote nonce not 0x00..0 or 0xff..f")
 
 	//epoch区块的nonce值只能是0x00..0
-	errInvalidEpochVote = errors.New("vote nonce in epoch block non-zero")
+	errInvalidEpochVote = errors.New("Vote nonce in epoch block non-zero")
 
 	//签名格式不符合
-	errMissingSignature = errors.New("extra-data 65 byte signature suffix missing")
+	errMissingSignature = errors.New("Extra-data 65 byte signature suffix missing")
 
 	//epoch区块的signer与本地的signer不配对
-	errInvalidEpochSigners = errors.New("invalid signer list on epoch block")
+	errInvalidEpochSigners = errors.New("Invalid signer list on epoch block")
 
 	//本地与入参的签名者不配对
-	errMismatchingEpochSigners = errors.New("mismatching signer list on epoch block")
+	errMismatchingEpochSigners = errors.New("Mismatching signer list on epoch block")
 
 	//叔块不是空
-	errInvalidUncleHash = errors.New("non empty uncle hash")
+	errInvalidUncleHash = errors.New("Non empty uncle hash")
 
 	//难度不是1或2
-	errInvalidDifficulty = errors.New("invalid difficulty")
+	errInvalidDifficulty = errors.New("Invalid difficulty")
 
 	//难度值不对，比如轮到我，但块难度是1,或轮不到我，但块难度是2
-	errWrongDifficulty = errors.New("wrong difficulty")
+	errWrongDifficultyAgainstSnap = errors.New("Wrong difficulty against snapshot")
+	
+	errWrongDifficultyAgainstExtra = errors.New("Wrong difficulty against header.extra")
 
 	//新区块的时间截不能大过父区块 + slotinterval
-	errInvalidTimestamp = errors.New("invalid timestamp")
+	errInvalidTimestamp = errors.New("Invalid timestamp")
 
 	// 用在snapshot, 检查入参的headers(多祖先块）是否合格
-	errInvalidVotingChain = errors.New("invalid voting chain")
+	errInvalidVotingChain = errors.New("Invalid voting chain")
 
 	//当前signer不属于合格的签名者
-	errUnauthorizedSigner = errors.New("unauthorized signer")
+	errUnauthorizedSignerAgainstSnap = errors.New("Unauthorized signer against snapshot")
+	
+	errUnauthorizedSignerAgainstExtra = errors.New("Unauthorized signer against header.extra")
 
 	//同一个签名者只能在signer limit个区块里出一次块，否则便会收到以下的错误
-	errRecentlySigned = errors.New("recently signed")
+	errRecentlySigned = errors.New("Recently signed")
 	
-	//Mint创世块时, 块体还没有同步
+	//块体还没有同步
 	errMissingBody = errors.New("Missing body")
+	
+	//epoch块高度不对
+	errWrongEpochNumber = errors.New("Wrong epoch number")
+	
+	//epoch块还没有来临
+	errMissingEpochBlock = errors.New("Missing epoch block during stateless situation")
 )
 
 // SignerFn hashes and signs the data to be signed by a backing account.
@@ -152,6 +162,7 @@ type Dpos struct {
 
 	//以下测试用途
 	fakeDiff bool //跳过难度验证
+	
 }
 
 func New(config *params.DposConfig, db ethdb.Database) *Dpos {
@@ -234,9 +245,11 @@ func(self *Dpos) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*typ
 Dpos没有叔块的概念，如果区块存在叔块，那么就返回错误
 */
 func(self *Dpos) VerifyUncles(chain consensus.ChainReader, block *types.Block) error {
-	if len(block.Uncles()) > 0 {
-		return errors.New("uncles not allowed")
+	
+	if len(block.Uncles()) != 0 {
+		return errors.New("uncle is not allow")
 	}
+
 	return nil
 }
 
@@ -275,12 +288,18 @@ func (self *Dpos) verifyHeader(chain consensus.ChainHeaderReader, header *types.
 	
 	if header.Extra[0] != 0x41 {
 		return errMissingSignature
-	//非epoch区块的extra只能是签名
-	} else if !epochBlock && len(header.Extra) != crypto.SignatureLength + 1 {
-		return errInvalidNonEpochExtra
-	} else if epochBlock {
-		extras = unserialize(header.Extra)
+	} 
+	
+	//找出入参的块头属于哪个epoch块
+	if !epochBlock {
+		//非epoch区块的extra只能是签名
+		if len(header.Extra) != crypto.SignatureLength + 1 {
+			return errInvalidNonEpochExtra
+		}
 		
+	} else  {
+		extras = unserialize(header.Extra)
+	
 		//至少需要一个signer,注意这里还未深入验证
 		if !(len(extras[1])%common.AddressLength ==0 && len(extras[1])/common.AddressLength > 0) {
 			return errInvalidEpochExtraSigner
@@ -332,18 +351,83 @@ func (self *Dpos) verifyHeader(chain consensus.ChainHeaderReader, header *types.
 	if parent.Time+self.config.SlotInterval > header.Time {
 		return errInvalidTimestamp
 	}
+
+	epochHeader := self.epochOfHeader(chain, header)
 	
-	//取最近的快照
+	//epochHeader在轻节点里可能找不到
+	if epochHeader != nil {
+		
+		//以下验证依据当前的epoch
+		
+		//检查入参块头是否符合epoch里的记录
+		signer, err := ecrecover(header, self.signatures)
+		if err != nil {
+			return err
+		}
+
+		signers, _, _ := parseEpochExtra(epochHeader)
+		totalSigners := len(signers)
+		
+		validSigner := false
+		offset := 0
+		
+		for _, _signer := range signers {
+			if _signer == signer {
+				validSigner = true
+			} else if !validSigner {
+				offset++
+			}
+		}	
+
+		if !validSigner {
+			return errUnauthorizedSignerAgainstExtra
+		}
+		
+		//这里取inturn的逻辑和snapshot.inturn()里的逻辑是一样的
+		inturn := (number % uint64(totalSigners)) == uint64(offset)
+		
+		//属inturn的signer必须给对应的难度#2
+		if inturn && header.Difficulty.Cmp(diffInTurn) != 0 {
+			return errWrongDifficultyAgainstExtra
+		}
+		
+		//属noturn的signer必须给对应的难度#1
+		if !inturn && header.Difficulty.Cmp(diffNoTurn) != 0 {
+			return errWrongDifficultyAgainstExtra
+		} 
+	}
+	
+	return nil
+}
+
+/*
+实现 consensus.Engine 接口
+*/
+func(self *Dpos) VerifySeal(chain consensus.ChainHeaderReader, header *types.Header) error {
+	return self.verifySeal(chain, header, nil)
+}
+
+func (self *Dpos) verifySeal(chain consensus.ChainHeaderReader, header *types.Header, parents []*types.Header) error {
+	
+	extras := unserialize(header.Extra)
+	
+	//不接受创世块
+	number := header.Number.Uint64()
+	if number == 0 {
+		return errUnknownBlock
+	}
+	epochBlock := (number % self.config.EpochInterval) == 0
+	
+	//取快照做二度检查
 	snap, err := self.snapshot(chain, number-1, header.ParentHash, parents)
 	if err != nil {
 		return err
 	}
 	
 	if epochBlock {
-		
 		//把本地签名者生成bytes (list)
-		signers := make([]byte, len(snap.UnconfirmedSigners)*common.AddressLength)
-		for i, signer := range snap.unconfirmedSigners() {
+		signers := make([]byte, len(snap.PreElectedSigners)*common.AddressLength)
+		for i, signer := range snap.preElectedSigners() {
 			copy(signers[i*common.AddressLength:], signer[:])
 		}
 		
@@ -353,46 +437,21 @@ func (self *Dpos) verifyHeader(chain consensus.ChainHeaderReader, header *types.
 		}
 	}
 	
-	return self.verifySeal(chain, header, parents)
-}
-
-
-/*
-实现 consensus.Engine 接口
-*/
-func(self *Dpos) VerifySeal(chain consensus.ChainHeaderReader, header *types.Header) error {
-	return self.verifySeal(chain, header, nil)
-}
-
-
-func (self *Dpos) verifySeal(chain consensus.ChainHeaderReader, header *types.Header, parents []*types.Header) error {
-	
-	//不接受创世块
-	number := header.Number.Uint64()
-	if number == 0 {
-		return errUnknownBlock
-	}
-	
-	//拿最近的快照
-	snap, err := self.snapshot(chain, number-1, header.ParentHash, parents)
-	if err != nil {
-		return err
-	}
-	
 	//检查签名者是否合格
 	signer, err := ecrecover(header, self.signatures)
 	if err != nil {
 		return err
 	}
-	if _, ok := snap.ConfirmedSigners[signer]; !ok {
-		return errUnauthorizedSigner
+	
+	if _, ok := snap.ElectedSigners[signer]; !ok {
+		return errUnauthorizedSignerAgainstSnap
 	}
 	
 	//检查签名者是否在signer limit个区块里多过一次出块
 	for seen, recent := range snap.Recents {
 		if recent == signer {
 			// Signer is among recents, only fail if the current block doesn't shift it out
-			if limit := uint64(len(snap.ConfirmedSigners)/2 + 1); seen > number-limit {
+			if limit := uint64(len(snap.ElectedSigners)/2 + 1); seen > number-limit {
 				return errRecentlySigned
 			}
 		}
@@ -403,12 +462,12 @@ func (self *Dpos) verifySeal(chain consensus.ChainHeaderReader, header *types.He
 		inturn := snap.inturn(header.Number.Uint64(), signer)
 		//属inturn的signer必须给对应的难度#2
 		if inturn && header.Difficulty.Cmp(diffInTurn) != 0 {
-			return errWrongDifficulty
+			return errWrongDifficultyAgainstSnap
 		}
 		
 		//属noturn的signer必须给对应的难度#1
 		if !inturn && header.Difficulty.Cmp(diffNoTurn) != 0 {
-			return errWrongDifficulty
+			return errWrongDifficultyAgainstSnap
 		}
 	}
 	
@@ -493,8 +552,8 @@ func(self *Dpos) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 		
 		item = make([]byte,0)
 		
-		//添加多签名者的信息, 按地址排序
-		for _, signer := range snap.unconfirmedSigners() {
+		//添加中选多签名者的信息, 按地址排序
+		for _, signer := range snap.preElectedSigners() {
 			item = append(item, signer[:]...)
 		}
 		
@@ -510,6 +569,26 @@ func(self *Dpos) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 		
 		header.Extra = append(header.Extra, VarIntToBytes(item)...)
 		header.Extra = append(header.Extra, item...)
+		
+		item = make([]byte,0)
+		
+		//添加中选委员人
+		for _, signer := range snap.preElectedSigners() {
+			delegators := snap.PreElectedDelegators[signer]
+			
+			subitem := []byte{}
+			for _, delegator:= range delegators {
+				subitem = append(subitem, delegator.Delegator.Bytes()...)
+				subitem = append(subitem, common.FromHex(fmt.Sprintf("%x", math.Float32bits(delegator.Portion)))...)
+			}
+			
+			item = append(item, VarIntToBytes(subitem)...)
+			item = append(item, subitem...)
+		}
+		
+		header.Extra = append(header.Extra, VarIntToBytes(item)...)
+		header.Extra = append(header.Extra, item...)
+		
 	}
 	
 	//更新正确的时间截
@@ -518,15 +597,14 @@ func(self *Dpos) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 		return consensus.ErrUnknownAncestor
 	}
 	
-	header.Time = parent.Time + self.config.SlotInterval
 	//header.Time 等于 max(parent.Time + Period, now) 
+	header.Time = parent.Time + self.config.SlotInterval
 	if header.Time < uint64(time.Now().Unix()) {
 		header.Time = uint64(time.Now().Unix())
 	}
 	
 	return nil
 }
-
 
 /*
 实现 consensus.Engine 接口
@@ -540,8 +618,6 @@ func(self *Dpos) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 */
 func(self *Dpos) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction,
 		uncles []*types.Header) {
-	
-	number := header.Number.Uint64()
 	
 	//读取应得的奖励
 	blockReward := FrontierBlockReward
@@ -557,7 +633,7 @@ func(self *Dpos) Finalize(chain consensus.ChainHeaderReader, header *types.Heade
 	signer, _ := ecrecover(header, self.signatures); 
 	
 	if signer == (common.Address{}) {
-		//否则这是miner打造的新区块
+		//否则这是miner正想打造的新区块
 		signer = self.signer 
 	} 
 	
@@ -572,51 +648,30 @@ func(self *Dpos) Finalize(chain consensus.ChainHeaderReader, header *types.Heade
 	toDelegators :=  new(big.Int).Set(blockReward)
 	toDelegators.Sub(toDelegators, toSigner)
 	
-	/*
-	找出入参的块头属于哪个epoch块
-	*/
-	var currentEpochBlock uint64
-	if number%self.config.EpochInterval == 0 {
-		currentEpochBlock = number - self.config.EpochInterval
-	} else {
-		currentEpochBlock = number - (number%self.config.EpochInterval)
+	//找出入参的块头属于哪个epoch块
+	epochHeader := self.epochOfHeader(chain, header)
+
+	signers, _, delegatorss := parseEpochExtra(epochHeader)
+	
+	electedDelegators :=  make(map[common.Address][]ElectedDelegator)
+	for k, delegators := range delegatorss {
+		for _, delegator := range delegators {
+			electedDelegators[signers[k]]= append(electedDelegators[signers[k]], delegator)
+		}
 	}
 	
-	if currentEpochBlock > 0 {
-		fmt.Println("chiew check currentEpochBlock", currentEpochBlock, "number", number)
-		
-		/*
-		向后循环直到找到currentEpochBlock-1的区块，为什么是currentEpochBlock-1，因为这个区块的snap里记录着投currentepoch签名者的委托人
-		*/
-		searchNumber := number - 1
-		searchHash := header.ParentHash
-		for searchNumber != currentEpochBlock - 1 {
-			header := chain.GetHeader(searchHash, searchNumber)
-			searchNumber, searchHash = searchNumber - 1, header.ParentHash
-		}
-
-		//取snap.Delegators，他们是获利者 
-		snap, _ := self.snapshot(chain, searchNumber , searchHash, nil)
-		
-		qualifiedDelegators := []common.Address{}
-		for delegator, candidate := range snap.Delegators {
-			if candidate == signer {
-				qualifiedDelegators = append(qualifiedDelegators, delegator)
-			}
-		}
-		
-		totalDelegators := int64(len(qualifiedDelegators))
-		
-		if totalDelegators > 0 {
-			//均分奖励，每人可得的份额
-			delegatorReward := toDelegators.Div(toDelegators, big.NewInt(totalDelegators)) 
-
-			if delegatorReward.Cmp(common.Big0) > 0 {
-				for _, delegator := range qualifiedDelegators {
-					state.AddBalance(delegator, delegatorReward)
-				}
+	totalDelegators := len(electedDelegators[signer])
+	
+	if totalDelegators > 0 {
+		//取中选的Delegators，他们是获利者 
+		for _, delegator := range electedDelegators[signer] {
 				
-			}
+			portionAmt := new(big.Float).Mul(new(big.Float).SetInt(toDelegators), big.NewFloat(float64(delegator.Portion))) 
+			
+			delegatorReward := new(big.Int)
+			portionAmt.Int(delegatorReward)
+	
+			state.AddBalance(delegator.Delegator, delegatorReward)
 		}
 	}
 	
@@ -635,7 +690,9 @@ func(self *Dpos) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *
 	self.Finalize(chain, header, state, txs, uncles)
 	
 	//返回一个未完成的区块，等待sealing(签名)
-	return types.NewBlock(header, txs, nil, receipts, new(trie.Trie)), nil
+	newBlock := types.NewBlock(header, txs, nil, receipts, new(trie.Trie))
+	
+	return newBlock, nil
 	
 }
 
@@ -652,14 +709,6 @@ func(self *Dpos) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 		return errUnknownBlock
 	}
 	
-	//不接受空tx
-	/*
-	if len(block.Transactions()) == 0 {
-		log.Info("Sealing paused, waiting for transactions")
-		return nil
-	}
-	*/
-	
 	//避免脏读
 	self.lock.RLock()
 	signer, signFn := self.signer, self.signFn
@@ -671,22 +720,20 @@ func(self *Dpos) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 		return err
 	}
 	
-	if _, authorized := snap.ConfirmedSigners[signer]; !authorized {
-		return errUnauthorizedSigner
+	if _, authorized := snap.ElectedSigners[signer]; !authorized {
+		return errUnauthorizedSignerAgainstSnap
 	}
 	
 	//奇怪，这个snap.Recents的检查不是在dpos.Prepare()里发生过了吗
-	
 	for seen, recent := range snap.Recents {
 		if recent == signer {
 			// Signer is among recents, only wait if the current block doesn't shift it out
-			if limit := uint64(len(snap.ConfirmedSigners)/2 + 1); number < limit || seen > number-limit {
+			if limit := uint64(len(snap.ElectedSigners)/2 + 1); number < limit || seen > number-limit {
 				log.Info("Signed recently, must wait for others")
 				return nil
 			}
 		}
 	}
-	
 	
 	delay := time.Unix(int64(header.Time), 0).Sub(time.Now()) // nolint: gosimple
 	if header.Difficulty.Cmp(diffNoTurn) == 0 {
@@ -696,7 +743,7 @@ func(self *Dpos) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 		
 		所以如果拥有出块权的签名者掉线，其他签名者还是可以签发的
 		*/
-		wiggle := time.Duration(len(snap.ConfirmedSigners)/2+1) * wiggleTime
+		wiggle := time.Duration(len(snap.ElectedSigners)/2+1) * wiggleTime
 		delay += time.Duration(rand.Int63n(int64(wiggle)))
 
 		log.Trace("Out-of-turn signing requested", "wiggle", common.PrettyDuration(wiggle))
@@ -706,7 +753,6 @@ func(self *Dpos) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 	签发块
 	*/
 	sighash, err := signFn(accounts.Account{Address: signer}, accounts.MimetypeDpos, RLP(header))
-	
 	
 	if err != nil {
 		return err
@@ -801,6 +847,32 @@ func(self *Dpos) Close() error {
 	return nil
 }
 
+func (self *Dpos) epochOfHeader(chain consensus.ChainHeaderReader, header *types.Header) (*types.Header) {
+	
+	number := header.Number.Uint64()
+	
+	var epochNumber uint64
+	if number%self.config.EpochInterval == 0 {
+		epochNumber = number - self.config.EpochInterval
+	} else {
+		epochNumber = number - (number%self.config.EpochInterval)
+	}
+		
+	//向后循环直到找到epochNumber
+	searchNumber := number - 1
+	searchHash := header.ParentHash
+	for searchNumber != epochNumber {
+		header := chain.GetHeader(searchHash, searchNumber)
+		
+		if header == nil {
+			return nil
+		}
+		searchNumber, searchHash = searchNumber - 1, header.ParentHash
+	}
+
+	return chain.GetHeaderByHash(searchHash)
+}
+
 /*
 跟据区块高度 number uint64去找最近的snapshot。snapshot是指在某个区块区间的状态，主要状态包括合格出块人、投票统计等等
 */
@@ -822,7 +894,8 @@ func (self *Dpos) snapshot(chain consensus.ChainHeaderReader, number uint64, has
 		*/
 		
 		//试试在磁盘里找
-		if number%storeSnapInterval == 0 {
+		if number%storeSnapInterval == 0 || (number+1)%self.config.EpochInterval == 0 {
+			
 			if s, err := loadSnapshot(self.config, self.signatures, self.db, hash); err == nil {
 				log.Trace("Loaded voting snapshot from disk", "number", number, "hash", hash)
 				snap = s
@@ -831,40 +904,27 @@ func (self *Dpos) snapshot(chain consensus.ChainHeaderReader, number uint64, has
 		}
 		
 		/*
-		内存和磁盘都找不到snap, 那么唯有创建新快照
 		
-		如果是创世块(创世块也是epoch区块) 或
+		原来的clique是这个逻辑： 
+		
+		如果当下是创世块 或
 		是epoch区块 和 区块数多过 params.FullImmutabilityThreshold (90000) 或
-		是epoch区块 和 父区块是nil??
+		是epoch区块 和 父区块是nil (轻节点）
+		
+		(number%self.config.EpochInterval == 0 && (len(headers) > params.FullImmutabilityThreshold || chain.GetHeaderByNumber(number-1) == nil)
+		
+		以下删掉的部分为了强制性要求snapshot必须是完整(从创世块开始），因为snapshot.Candidates和snapshot.Delegators是长期累积的
+		
 		*/
-		if number == 0 || (number%self.config.EpochInterval == 0 && (len(headers) > params.FullImmutabilityThreshold || chain.GetHeaderByNumber(number-1) == nil)) {
+		if number == 0 {
 			
+			thisHeader := chain.GetHeaderByNumber(number)
 			
-			epochBlockHeader := chain.GetHeaderByNumber(number)
-			if epochBlockHeader != nil {
-				hash := epochBlockHeader.Hash()
-
-				extras := unserialize(epochBlockHeader.Extra)
-				signers := make([]common.Address, len(extras[1])/common.AddressLength)
+			if thisHeader != nil {
 				
-				for i := 0; i < len(signers); i++ {
-					copy(signers[i][:], extras[1][i*common.AddressLength:])
-				}
+				signers, proposals, delegatorss := parseEpochExtra(thisHeader)
 				
-				proposalCnt := len(extras[2])/common.HashLength
-				proposals := make([]*Proposal, 0)
-				
-				for i := 0; i < proposalCnt; i++ {
-					proposal := &Proposal{}
-					if err := proposal.fromBytes(common.BytesToHash(extras[2][i*common.HashLength:(i+1)*common.HashLength])); err!= nil {
-						return nil, err
-					}
-					
-					proposals = append(proposals, proposal)
-				}
-				
-				snap = newSnapshot(self.config, self.signatures, number, hash, signers, proposals)
-				
+				snap = newSnapshot(self.config, self.signatures, number, hash, signers,proposals, delegatorss)
 				if err := snap.store(self.db); err != nil {
 					return nil, err
 				}
@@ -872,7 +932,7 @@ func (self *Dpos) snapshot(chain consensus.ChainHeaderReader, number uint64, has
 				break
 			}
 		}
-		
+
 		var header *types.Header
 		//如果找到入参的parents,那么使用它继续往后找
 		if len(parents) > 0 {
@@ -900,9 +960,9 @@ func (self *Dpos) snapshot(chain consensus.ChainHeaderReader, number uint64, has
 	}
 	
 	//处理投票
-	
-	snap, err := snap.apply(chain.(*core.BlockChain), headers, self.db) 
+	snap, err := snap.apply(chain.(consensus.ChainReader), headers, self.db) 
 	if err != nil {
+		
 		return nil, err
 	}
 	

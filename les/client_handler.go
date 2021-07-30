@@ -22,7 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
+	
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/core/forkid"
@@ -156,7 +156,7 @@ func (h *clientHandler) handleMsg(p *serverPeer) error {
 	defer msg.Discard()
 
 	var deliverMsg *Msg
-
+	
 	// Handle the message depending on its contents
 	switch {
 	case msg.Code == AnnounceMsg:

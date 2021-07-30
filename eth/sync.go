@@ -21,7 +21,7 @@ import (
 	"math/rand"
 	"sync/atomic"
 	"time"
-
+	
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -295,7 +295,10 @@ func (cs *chainSyncer) modeAndLocalHead() (downloader.SyncMode, *big.Int) {
 // startSync launches doSync in a new goroutine.
 func (cs *chainSyncer) startSync(op *chainSyncOp) {
 	cs.doneCh = make(chan error, 1)
-	go func() { cs.doneCh <- cs.pm.doSync(op) }()
+	go func() { 
+		
+	cs.doneCh <- cs.pm.doSync(op) 
+	}()
 }
 
 // doSync synchronizes the local blockchain with a remote peer.
@@ -318,8 +321,11 @@ func (pm *ProtocolManager) doSync(op *chainSyncOp) error {
 			log.Warn("Update txLookup limit", "provided", limit, "updated", *stored)
 		}
 	}
+	
+	
 	// Run the sync cycle, and disable fast sync if we're past the pivot block
 	err := pm.downloader.Synchronise(op.peer.id, op.head, op.td, op.mode)
+	
 	if err != nil {
 		return err
 	}
@@ -331,9 +337,11 @@ func (pm *ProtocolManager) doSync(op *chainSyncOp) error {
 	// If we've successfully finished a sync cycle and passed any required checkpoint,
 	// enable accepting transactions from the network.
 	head := pm.blockchain.CurrentBlock()
+	
 	if head.NumberU64() >= pm.checkpointNumber {
 		// Checkpoint passed, sanity check the timestamp to have a fallback mechanism
 		// for non-checkpointed (number = 0) private networks.
+		
 		if head.Time() >= uint64(time.Now().AddDate(0, -1, 0).Unix()) {
 			atomic.StoreUint32(&pm.acceptTxs, 1)
 		}

@@ -23,8 +23,10 @@ import (
 	"sort"
 	"time"
 	"fmt"
+	
 	"math/big"
 	"math/rand"
+	_ "errors"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -32,25 +34,29 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/core/state"
-	_ "github.com/ethereum/go-ethereum/consensus"
-	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/consensus"
+	_ "github.com/ethereum/go-ethereum/core"
 	lru "github.com/hashicorp/golang-lru"
 	
 )
 
 const (
 	dbSnapPrefix string = "dpos-"
-	
 )
 
 /*
-每张票的信息，它将影响到Tally.Votes的结果
+每张票的信息
 */
 type Vote struct {
 	Signer   common.Address `json:"signer"`   // Authorized signer that cast this vote
 	Block    uint64         `json:"block"`    // Block number the vote was cast in (expire old votes)
 	YesNo    bool           `json:"yesno"`
 	Proposal common.Hash    `json:"proposal"` // Proposal bytes
+}
+
+type ElectedDelegator struct {
+	Delegator common.Address `json:"delegator"`
+	Portion float32          `json:"portion"`
 }
 
 // Snapshot is the state of the authorization voting at a given point in time.
@@ -61,11 +67,14 @@ type Snapshot struct {
 	Number  uint64                      `json:"number"`   //快照会一直更新区块高度
 	Hash    common.Hash                 `json:"hash"`     //快照会一直更新区块哈希
 	
-	ConfirmedSigners map[common.Address]uint16 `json:"signers"`  //当前合格的签名者， 值为出块数
-	UnconfirmedSigners map[common.Address]struct{} `json:"ucsigners"`  //即将成为合格签名者
+	ElectedSigners map[common.Address]uint16 `json:"elected_signers"`  //当前合格的签名者， 值为出块数
+	PreElectedSigners map[common.Address]struct{} `json:"pre_elected_signers"`  //即将成为合格签名者
+	
+	ElectedDelegators map[common.Address][]ElectedDelegator `json:"elected_delegators"`
+	PreElectedDelegators map[common.Address][]ElectedDelegator `json:"pre_elected_delegators"`
 	
 	ConfirmedProposals map[uint8]common.Hash `json:"proposals"`//记录已定案结果
-	UnconfirmedProposals map[uint8]common.Hash `json:"ucproposals"`//记录即将定案结果
+	UnconfirmedProposals map[uint8]common.Hash `json:"unconfirmed_proposals"`//记录即将定案结果
 
 	Candidates map[common.Address]struct{} `json:"candidates"` //候选人
 	Delegators map[common.Address]common.Address `json:"delegators"` //委任人，键值为delegator地址，值为signer地址
@@ -76,17 +85,10 @@ type Snapshot struct {
 	
 }
 
-// signersAscending implements the sort interface to allow sorting a list of addresses
-type signersAscending []common.Address
-
-func (s signersAscending) Len() int           { return len(s) }
-func (s signersAscending) Less(i, j int) bool { return bytes.Compare(s[i][:], s[j][:]) < 0 }
-func (s signersAscending) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
-
 // newSnapshot creates a new snapshot with the specified startup parameters. This
 // method does not initialize the set of recent signers, so only ever use if for
 // the genesis block.
-func newSnapshot(config *params.DposConfig, sigcache *lru.ARCCache, number uint64, hash common.Hash, signers []common.Address, proposals []*Proposal) *Snapshot {
+func newSnapshot(config *params.DposConfig, sigcache *lru.ARCCache, number uint64, hash common.Hash, signers []common.Address, proposals []*Proposal, delegatorss [][]ElectedDelegator) *Snapshot {
 	
 	snap := &Snapshot{
 		config:   config,
@@ -94,8 +96,11 @@ func newSnapshot(config *params.DposConfig, sigcache *lru.ARCCache, number uint6
 		Number:   number,
 		Hash:     hash,
 		
-		ConfirmedSigners:  make(map[common.Address]uint16),
-		UnconfirmedSigners:  make(map[common.Address]struct{}),
+		ElectedSigners:  make(map[common.Address]uint16),
+		PreElectedSigners:  make(map[common.Address]struct{}),
+		
+		ElectedDelegators:  make(map[common.Address][]ElectedDelegator),
+		PreElectedDelegators:  make(map[common.Address][]ElectedDelegator),
 		
 		ConfirmedProposals:make(map[uint8]common.Hash),
 		UnconfirmedProposals:make(map[uint8]common.Hash),
@@ -108,18 +113,30 @@ func newSnapshot(config *params.DposConfig, sigcache *lru.ARCCache, number uint6
 	}
 	
 	for _, signer := range signers {
-		snap.ConfirmedSigners[signer] = uint16(0)
+		snap.ElectedSigners[signer] = uint16(0)
+		snap.ElectedDelegators[signer] = []ElectedDelegator{}
 		
-		if number == uint64(0) {
+		if number == uint64(0) { //创世块,处理初始化
 			snap.Candidates[signer] = struct{}{}
 		}
 	}
 	
 	for _, proposal := range proposals {
 		
-		hash, err:=proposal.toBytes()
+		hash, err := proposal.toBytes()
 		_ = err
 		snap.ConfirmedProposals[ proposal.Id ] = hash
+	}
+	
+	
+	for k, delegators := range delegatorss {
+		for _, delegator := range delegators {
+			snap.ElectedDelegators[signers[k]]= append(snap.ElectedDelegators[signers[k]], delegator)
+			
+			if number == uint64(0) { //创世块,处理初始化
+				snap.Delegators[delegator.Delegator] = signers[k]
+			}
+		}
 	}
 	
 	return snap
@@ -162,26 +179,49 @@ func (s *Snapshot) copy() *Snapshot {
 		Number:   s.Number,
 		Hash:     s.Hash,
 		
-		ConfirmedSigners:  make(map[common.Address]uint16),
-		UnconfirmedSigners: make(map[common.Address]struct{}),
+		ElectedSigners:  make(map[common.Address]uint16),
+		PreElectedSigners: make(map[common.Address]struct{}),
+		
+		ElectedDelegators:  make(map[common.Address][]ElectedDelegator),
+		PreElectedDelegators:  make(map[common.Address][]ElectedDelegator),
+		
 		ConfirmedProposals:  make(map[uint8]common.Hash),
 		UnconfirmedProposals:make(map[uint8]common.Hash),
 		
 		Candidates: make(map[common.Address]struct{}),
 		Delegators: make(map[common.Address]common.Address),
 		
-		
 		Recents:  make(map[uint64]common.Address),
 		Votes:    make([]*Vote, len(s.Votes)),
 		Tally:    make(map[common.Hash]int),
 	}
 	
-	for signer, mintCnt := range s.ConfirmedSigners {
-		cpy.ConfirmedSigners[signer] = mintCnt
+	for signer, mintCnt := range s.ElectedSigners {
+		cpy.ElectedSigners[signer] = mintCnt
 	}
 	
-	for signer := range s.UnconfirmedSigners {
-		cpy.UnconfirmedSigners[signer] = struct{}{}
+	for signer := range s.PreElectedSigners {
+		cpy.PreElectedSigners[signer] = struct{}{}
+	}
+		
+	for signer, electedDelegators := range s.ElectedDelegators {
+		if _, exist := cpy.ElectedDelegators[signer]; !exist {
+			cpy.ElectedDelegators[signer] = make([]ElectedDelegator,0)
+		}
+		
+		for _, electedDelegator := range electedDelegators {
+			cpy.ElectedDelegators[signer] = append(cpy.ElectedDelegators[signer], electedDelegator)
+		}
+	}
+	
+	for signer, electedDelegators := range s.PreElectedDelegators {
+		if _, exist := cpy.PreElectedDelegators[signer]; !exist {
+			cpy.PreElectedDelegators[signer] = make([]ElectedDelegator,0)
+		}
+		
+		for _, electedDelegator := range electedDelegators {
+			cpy.PreElectedDelegators[signer] = append(cpy.PreElectedDelegators[signer], electedDelegator)
+		}
 	}
 	
 	for candidate := range s.Candidates {
@@ -237,7 +277,7 @@ func (s *Snapshot) lastVote(signer common.Address, proposalBytes common.Hash) *V
 func (s *Snapshot) validVote(signer common.Address, proposalBytes common.Hash, yesNo bool) bool {
 	
 	//必须是合格的出块人
-	if _, exist := s.ConfirmedSigners[signer]; !exist {
+	if _, exist := s.ElectedSigners[signer]; !exist {
 		return false
 	}
 
@@ -335,73 +375,82 @@ func (s *Snapshot) uncast(signer common.Address, proposalBytes common.Hash) bool
 }
 
 //排序相关的函数和接口
-type sortTallyDesc struct {
+
+
+// signersAscending implements the sort interface to allow sorting a list of addresses
+type signersAscending []common.Address
+
+func (s signersAscending) Len() int           { return len(s) }
+func (s signersAscending) Less(i, j int) bool { return bytes.Compare(s[i][:], s[j][:]) < 0 }
+func (s signersAscending) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+type hashIntDesc struct {
 	Key common.Hash
 	Value int
 }
 
-type sortTalliesDesc []sortTallyDesc
-func (p sortTalliesDesc) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
-func (p sortTalliesDesc) Len() int { return len(p) }
-func (p sortTalliesDesc) Less(i, j int) bool { return p[i].Value > p[j].Value }
+type manyHashIntDesc []hashIntDesc
+func (p manyHashIntDesc) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
+func (p manyHashIntDesc) Len() int { return len(p) }
+func (p manyHashIntDesc) Less(i, j int) bool { return p[i].Value > p[j].Value }
 
-func tallySorter(m map[common.Hash]int) sortTalliesDesc {
-	p := make(sortTalliesDesc, len(m))
+func hashIntDescSorter(m map[common.Hash]int) manyHashIntDesc {
+	p := make(manyHashIntDesc, len(m))
 	i := 0
 	for k, v := range m {
-		p[i] = sortTallyDesc{k, v}
+		p[i] = hashIntDesc{k, v}
 		i++
 	}
 	sort.Sort(p)
 	return p
 }
 
-
-type sortConfirmedSignerAsc struct {
+type addressIntAsc struct {
 	Key common.Address
 	Value int
 }
 
-type sortConfirmedSignersAsc []sortConfirmedSignerAsc
-func (p sortConfirmedSignersAsc) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
-func (p sortConfirmedSignersAsc) Len() int { return len(p) }
-func (p sortConfirmedSignersAsc) Less(i, j int) bool { return p[i].Value < p[j].Value }
+type manyAddressIntAsc []addressIntAsc
+func (p manyAddressIntAsc) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
+func (p manyAddressIntAsc) Len() int { return len(p) }
+func (p manyAddressIntAsc) Less(i, j int) bool { return p[i].Value < p[j].Value }
 
-func confirmedSignersSorter(m map[common.Address]uint16) sortConfirmedSignersAsc {
-	p := make(sortConfirmedSignersAsc, len(m))
+func addressIntAscSorter(m map[common.Address]uint16) manyAddressIntAsc {
+	p := make(manyAddressIntAsc, len(m))
 	i := 0
 	for k, v := range m {
-		p[i] = sortConfirmedSignerAsc{k, int(v)}
+		p[i] = addressIntAsc{k, int(v)}
 		i++
 	}
 	sort.Sort(p)
 	return p
 }
 
-type sortCandidateVoteDesc struct {
-	address common.Address
-	weight  *big.Int
+type addressBigIntDesc struct {
+	Key common.Address
+	Value  *big.Int
 }
 
-type sortCandidateVotesDesc []sortCandidateVoteDesc
 
-func (p sortCandidateVotesDesc) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
-func (p sortCandidateVotesDesc) Len() int      { return len(p) }
-func (p sortCandidateVotesDesc) Less(i, j int) bool {
-	if p[i].weight.Cmp(p[j].weight) < 0 {
+type manyAddressBigIntDesc []addressBigIntDesc
+
+func (p manyAddressBigIntDesc) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
+func (p manyAddressBigIntDesc) Len() int      { return len(p) }
+func (p manyAddressBigIntDesc) Less(i, j int) bool {
+	if p[i].Value.Cmp(p[j].Value) < 0 {
 		return false
-	} else if p[i].weight.Cmp(p[j].weight) > 0 {
+	} else if p[i].Value.Cmp(p[j].Value) > 0 {
 		return true
 	} else {
-		return p[i].address.String() < p[j].address.String()
+		return p[i].Key.String() < p[j].Key.String()
 	}
 }
 
-func candidateVotesSorter(m map[common.Address]*big.Int) sortCandidateVotesDesc {
-	p := make(sortCandidateVotesDesc, len(m))
+func addressBigIntDescSorter(m map[common.Address]*big.Int) manyAddressBigIntDesc {
+	p := make(manyAddressBigIntDesc, len(m))
 	i := 0
 	for k, v := range m {
-		p[i] = sortCandidateVoteDesc{k, v}
+		p[i] = addressBigIntDesc{k, v}
 		i++
 	}
 	sort.Sort(p)
@@ -410,8 +459,8 @@ func candidateVotesSorter(m map[common.Address]*big.Int) sortCandidateVotesDesc 
 
 // apply creates a new authorization snapshot by applying the given headers to
 // the original one.
-func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethdb.Database) (*Snapshot, error) {
-	
+func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db ethdb.Database) (*Snapshot, error) {
+
 	// Allow passing in no headers for cleaner code
 	if len(headers) == 0 {
 		return s, nil
@@ -423,14 +472,14 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 			return nil, errInvalidVotingChain
 		}
 	}
-	
+
 	if headers[0].Number.Uint64() != s.Number+1 {
 		return nil, errInvalidVotingChain
 	}
 	
 	// Iterate through the headers and create a new snapshot
 	snap := s.copy()
-	
+
 	var (
 		start  = time.Now()
 		logged = time.Now()
@@ -438,13 +487,16 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 	
 	for i, header := range headers {
 		
+		snap.Number += 1
+		snap.Hash = header.Hash()
+	
 		number := header.Number.Uint64()
 		
 		if number%s.config.EpochInterval == 0 {
-			
+
 			//process kickout
-			for kickoutSigner := range snap.ConfirmedSigners {
-				_, exist := snap.UnconfirmedSigners[kickoutSigner]
+			for kickoutSigner := range snap.ElectedSigners {
+				_, exist := snap.PreElectedSigners[kickoutSigner]
 				
 				if !exist {
 					//被踢出者丧失候选人身份
@@ -466,12 +518,18 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 				snap.ConfirmedProposals[k] = v
 			}
 			
-			snap.ConfirmedSigners = make(map[common.Address]uint16)
-			for k := range snap.UnconfirmedSigners {
-				snap.ConfirmedSigners[k] = 0
+			snap.ElectedSigners = make(map[common.Address]uint16)
+			for k := range snap.PreElectedSigners {
+				snap.ElectedSigners[k] = 0
 			}
 			
-			snap.UnconfirmedSigners = make(map[common.Address]struct{})
+			snap.ElectedDelegators = make(map[common.Address][]ElectedDelegator)
+			for k, v := range snap.PreElectedDelegators {
+				snap.ElectedDelegators[k] = v
+			}
+			
+			snap.PreElectedDelegators = make(map[common.Address][]ElectedDelegator)
+			snap.PreElectedSigners = make(map[common.Address]struct{})
 			snap.UnconfirmedProposals = make(map[uint8]common.Hash)
 			
 			//在epoch区块时，清除投票信息
@@ -490,7 +548,7 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 		删除高度 = 100 - 4 = 96
 		删除snap.Recents[96],表示在96高度的这位签名者可以被解放了，他可以在97到100的新块间再签一次
 		*/
-		if limit := uint64(len(snap.ConfirmedSigners)/2 + 1); number >= limit {
+		if limit := uint64(len(snap.ElectedSigners)/2 + 1); number >= limit {
 			delete(snap.Recents, number-limit)
 		}
 		
@@ -501,10 +559,10 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 			return nil, err
 		}
 
-		if _, ok := snap.ConfirmedSigners[signer]; !ok {
-			return nil, errUnauthorizedSigner
+		if _, ok := snap.ElectedSigners[signer]; !ok {
+			return nil, errUnauthorizedSignerAgainstSnap
 		} else {
-			snap.ConfirmedSigners[signer]++
+			snap.ElectedSigners[signer]++
 		}
 		
 		//snap.Recents保证在signer limit个区块间，一个signer只有一个签名
@@ -538,49 +596,46 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 			})
 		}
 		
-		//添加新delegator
+		//由于eth是先同步块头后同步块体，返回错误是因为块体还未完成同步
 		block := chain.GetBlock(header.Hash(), number)
 		
-		//由于eth是先同步块头后同步块体，返回错误是因为块体还未完成同步
-		if block == nil {
-			//return nil, errMissingBody
+		if block == nil  {
+			//轻节点一定会触发这个错误，所以目前轻节点不能通过API读取快照
+			return nil, errMissingBody
 		} else {
+			
 			txs := block.Body().Transactions
-			if len(txs) == 0 {
-				//return nil, errMissingBody
-			} else {
+			
+			ethSigner := types.MakeSigner(chain.Config(), new(big.Int).SetUint64(number))
+			
+			for i:=0; i < len(txs); i++ {
+				tx := txs[i]
 				
-				ethSigner := types.MakeSigner(chain.Config(), new(big.Int).SetUint64(number))
-				
-				for i:=0; i < len(txs); i++ {
-					tx := txs[i]
-					
-					if *tx.To() == contractAddress {
-						action:= &Action{}
-						if err := action.fromBytes(tx.Data()); err == nil {
-							
-							if from, err := ethSigner.Sender(tx); err == nil {
+				if *tx.To() == contractAddress {
+					action:= &Action{}
+					if err := action.fromBytes(tx.Data()); err == nil {
+						
+						if from, err := ethSigner.Sender(tx); err == nil {
 
-								switch action.Id {
-									case becomeCandidate:
-										snap.Candidates[from] = struct{}{}
+							switch action.Id {
+								case becomeCandidate:
+									snap.Candidates[from] = struct{}{}
+								
+								case becomeDelegator:
 									
-									case becomeDelegator:
-										
-										candidate := action.Values[0].(common.Address)
-										
-										_, exist := snap.Candidates[candidate]
-										
-										if exist {
-											snap.Delegators[from] = candidate
-										}
-										
-									case quitCandidate:
-										delete(snap.Candidates,from)
-										
-									case quitDelegator:
-										delete(snap.Delegators,from)
-								}
+									candidate := action.Values[0].(common.Address)
+									
+									_, exist := snap.Candidates[candidate]
+									
+									if exist {
+										snap.Delegators[from] = candidate
+									}
+									
+								case quitCandidate:
+									delete(snap.Candidates,from)
+									
+								case quitDelegator:
+									delete(snap.Delegators,from)
 							}
 						}
 					}
@@ -589,85 +644,126 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 		}
 		
 		if (number+1)%s.config.EpochInterval == 0 {
+			fmt.Printf("")
 			
 			statedb, err := state.New(header.Root, state.NewDatabase(db), nil)
-			if err!=nil {
-				return nil, err
-			}
-			
-			//这里预选新签名者
-			
-			//每个出块人的最低出块数，低过这个值将被开除, -1 是不包括epoch块
-			minMintTarget := (int(snap.config.EpochInterval) - 1) / len(snap.ConfirmedSigners) / 2
-			candidateCnt := len(snap.Candidates) - len(snap.ConfirmedSigners)
-			candidateCnt = 1
-			sorted := confirmedSignersSorter(snap.ConfirmedSigners)
-			
-			//被踢出签名者,将丧失候选人身份
-			kickoutSigners := make(map[common.Address]struct{},0)
-			candidateVotes := make(map[common.Address]*big.Int)
-			
-			for _, kv := range sorted {
 				
-				address := kv.Key
-				mintCnt := kv.Value
+			if err != nil {
 				
-				if len(kickoutSigners) < candidateCnt && mintCnt < minMintTarget {
-					
-					kickoutSigners[address] = struct{}{}
-					
-					log.Info("Signer has been kickout", "signer", address, "mintCnt", mintCnt, "minMintTarget", minMintTarget)
+				//这里针对before Pivot和Pivot之间没有state的区块 (fast-sync),虽然牵强，但为了连贯性只有为之
+				if len(headers)-1 < i + 1 {
+					return nil, errMissingEpochBlock
 				} else {
-					candidateVotes[ address ] = big.NewInt(0)
+					
+					electedSigners, _, delegatorss := parseEpochExtra(headers[i+1])
+					electedDelegators :=  make(map[common.Address][]ElectedDelegator)
+					for k, delegators := range delegatorss {
+						for _, delegator := range delegators {
+							electedDelegators[electedSigners[k]]= append(electedDelegators[electedSigners[k]], delegator)
+						}
+					}
+					
+					for _, signer := range electedSigners {
+						snap.PreElectedSigners[signer]  = struct{}{}
+					}
+					snap.PreElectedDelegators = electedDelegators
 				}
-			}
-			
-			//如今 snap.Candidates都是合格的候选人， 开始竞争!
-			
-			//计算每个候选人能获得的支持率
-			
-			var exist bool
-			for delegator, candidate := range snap.Delegators {
-				_, exist = kickoutSigners[candidate]
+			} else {
+					
+				//这里预选新签名者
+				//每个出块人的最低出块数，低过这个值将被开除, -1 是不包括epoch块
+				minMintTarget := (int(snap.config.EpochInterval) - 1) / len(snap.ElectedSigners) / 2
+				candidateCnt := len(snap.Candidates) - len(snap.ElectedSigners)
+				candidateCnt = 1
+				sorted := addressIntAscSorter(snap.ElectedSigners)
 				
-				if exist {
-					continue
+				//被踢出签名者,将丧失候选人身份
+				kickoutSigners := make(map[common.Address]struct{},0)
+				candidateVotes := make(map[common.Address]*big.Int)
+				
+				for _, kv := range sorted {
+					
+					address := kv.Key
+					mintCnt := kv.Value
+					
+					if len(kickoutSigners) < candidateCnt && mintCnt < minMintTarget {
+						kickoutSigners[address] = struct{}{}
+					} else {
+						candidateVotes[ address ] = big.NewInt(0)
+					}
 				}
 				
-				_, exist = kickoutSigners[delegator]
-				
-				if exist {
-					continue
+				//如今 snap.Candidates都是合格的候选人， 开始竞争!
+				var exist bool
+				for delegator, candidate := range snap.Delegators {
+					_, exist = kickoutSigners[candidate]
+					
+					if exist {
+						continue
+					}
+					
+					_, exist = kickoutSigners[delegator]
+					
+					if exist {
+						continue
+					}
+					
+					_, exist = candidateVotes[candidate]
+					
+					if !exist {
+						candidateVotes[candidate] = big.NewInt(0)
+					}
+					
+					balance := statedb.GetBalance(delegator)
+					
+					if balance.Cmp(common.Big0) > 0 {
+						//计算每个候选人的支持率
+						candidateVotes[candidate].Add(candidateVotes[candidate],balance)
+					}
 				}
 				
-				_, exist = candidateVotes[candidate]
+				newSigners := addressBigIntDescSorter(candidateVotes)
 				
-				if !exist {
-					candidateVotes[candidate] = big.NewInt(0)
+				if len(newSigners) > maxSignerSize {
+					newSigners = newSigners[:maxSignerSize]
 				}
 				
-				balance := statedb.GetBalance(delegator)
-				if balance.Cmp(common.Big0) > 0 {
-					candidateVotes[candidate].Add(candidateVotes[candidate],balance)
+				epochCnt := (number+1)/s.config.EpochInterval
+				seed := int64(binary.LittleEndian.Uint32(crypto.Keccak512(header.Hash().Bytes()))) + int64(epochCnt)
+				r := rand.New(rand.NewSource(seed))
+				for i := len(newSigners) - 1; i > 0; i-- {
+					j := int(r.Int31n(int32(i + 1)))
+					newSigners[i], newSigners[j] = newSigners[j], newSigners[i]
 				}
-			}
-			
-			newSigners := candidateVotesSorter(candidateVotes)
-			fmt.Println("")
-			if len(newSigners) > maxSignerSize {
-				newSigners = newSigners[:maxSignerSize]
-			}
-			
-			epochCnt := (number+1)/s.config.EpochInterval
-			seed := int64(binary.LittleEndian.Uint32(crypto.Keccak512(header.Hash().Bytes()))) + int64(epochCnt)
-			r := rand.New(rand.NewSource(seed))
-			for i := len(newSigners) - 1; i > 0; i-- {
-				j := int(r.Int31n(int32(i + 1)))
-				newSigners[i], newSigners[j] = newSigners[j], newSigners[i]
-			}
-			
-			for _, newSigner := range newSigners {
-				snap.UnconfirmedSigners[newSigner.address] = struct{}{}
+				
+				for _, newSigner := range newSigners {
+					preElectedSigner := newSigner.Key
+					snap.PreElectedSigners[preElectedSigner] = struct{}{}
+					
+					//处理pre elected delegator
+					snap.PreElectedDelegators[preElectedSigner] = []ElectedDelegator{}
+					
+					delegators := make(map[common.Address]*big.Int)
+					sum := new(big.Int)
+					for delegator, candidate := range snap.Delegators {
+						if candidate == preElectedSigner {
+							delegators[delegator] = statedb.GetBalance(delegator)
+							sum.Add(sum,delegators[delegator])
+						}
+					}
+					
+					sortedDelegators := addressBigIntDescSorter(delegators)
+					operand2 := new(big.Float).SetInt(sum)
+					for i := 0; i < len(sortedDelegators); i++ {
+						address := sortedDelegators[i].Key
+						operand1 := new(big.Float).SetInt(sortedDelegators[i].Value)
+						result := new(big.Float).Quo(operand1, operand2)
+						
+						portion, _ := result.Float32()
+						
+						snap.PreElectedDelegators[preElectedSigner] = append(snap.PreElectedDelegators[preElectedSigner], ElectedDelegator{address, portion})
+					}
+				}
 			}
 			
 			//由于相同的提案ID但不同的值（子提案）是可以做多，这里按ID把同类型的提案重新组合
@@ -693,7 +789,7 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 			for proposalId, proposalVotes := range groupProposals {
 				
 				if len(proposalVotes) > 1 {
-					sorted := tallySorter(proposalVotes)
+					sorted := hashIntDescSorter(proposalVotes)
 					
 					//如果同类的两个子提案的获得票是相同的，那么这个提案将无效
 					if sorted[0].Value == sorted[1].Value {
@@ -718,7 +814,10 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 				snap.UnconfirmedProposals[proposalId] = proposalBytes
 			}
 			
-			//UnconfirmedProposals将在epoch区块被处理
+			//快照epochblock-1的块，因为旧state有可能被删除
+			if err := snap.store(db); err != nil {
+				return nil, err
+			} 
 		}
 		
 		//如果process时间过长就写入日志
@@ -733,30 +832,27 @@ func (s *Snapshot) apply(chain *core.BlockChain,headers []*types.Header, db ethd
 		log.Info("Reconstructed voting history", "processed", len(headers), "elapsed", common.PrettyDuration(time.Since(start)))
 	}
 	
-	snap.Number += uint64(len(headers))
-	snap.Hash = headers[len(headers)-1].Hash()
-	
 	return snap, nil
 }
 
 
-func (s *Snapshot) unconfirmedSigners() []common.Address {
-	sigs := make([]common.Address, 0, len(s.UnconfirmedSigners))
-	for sig := range s.UnconfirmedSigners {
-		sigs = append(sigs, sig)
+func (s *Snapshot) preElectedSigners() []common.Address {
+	signers := make([]common.Address, 0, len(s.PreElectedSigners))
+	for signer := range s.PreElectedSigners {
+		signers = append(signers, signer)
 	}
-	sort.Sort(signersAscending(sigs))
-	return sigs
+	sort.Sort(signersAscending(signers))
+	return signers
 }
 
 // signers retrieves the list of authorized signers in ascending order.
-func (s *Snapshot) confirmedSigners() []common.Address {
-	sigs := make([]common.Address, 0, len(s.ConfirmedSigners))
-	for sig := range s.ConfirmedSigners {
-		sigs = append(sigs, sig)
+func (s *Snapshot) electedSigners() []common.Address {
+	signers := make([]common.Address, 0, len(s.ElectedSigners))
+	for signer := range s.ElectedSigners {
+		signers = append(signers, signer)
 	}
-	sort.Sort(signersAscending(sigs))
-	return sigs
+	sort.Sort(signersAscending(signers))
+	return signers
 }
 
 func (s *Snapshot) unconfirmedProposals() []common.Hash {
@@ -800,7 +896,7 @@ func (s *Snapshot) confirmedProposals() []common.Hash {
 
 // inturn returns if a signer at a given block height is in-turn or not.
 func (s *Snapshot) inturn(number uint64, signer common.Address) bool {
-	signers, offset := s.confirmedSigners(), 0
+	signers, offset := s.electedSigners(), 0
 	for offset < len(signers) && signers[offset] != signer {
 		offset++
 	}

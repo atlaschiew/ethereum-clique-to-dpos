@@ -190,6 +190,7 @@ func (net *Network) ReadRandomNodes(buf []*Node) (n int) {
 func (net *Network) SetFallbackNodes(nodes []*Node) error {
 	nursery := make([]*Node, 0, len(nodes))
 	for _, n := range nodes {
+		
 		if err := n.validateComplete(); err != nil {
 			return fmt.Errorf("bad bootstrap/fallback node %q (%v)", n, err)
 		}
