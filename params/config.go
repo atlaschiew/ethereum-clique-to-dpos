@@ -33,6 +33,9 @@ var (
 	GoerliGenesisHash  = common.HexToHash("0xbf7e331f7f7c1dd2e05159666b3bf8bc7a8a3a9eb1d518969eab529dd9b88c1a")
 	// TODO: update with yolov2 values
 	YoloV2GenesisHash = common.HexToHash("0x498a7239036dd2cd09e2bb8a80922b78632017958c332b42044c250d603a8a3e")
+	
+	//DPOS，测试用途
+	DposGenesisHash = common.HexToHash("0x578a68eb10627242c1ac7c24df1adfe878c04bb23c4679bda0d6976af2bc1a73")
 )
 
 // TrustedCheckpoints associates each known checkpoint with the genesis hash of
@@ -42,6 +45,7 @@ var TrustedCheckpoints = map[common.Hash]*TrustedCheckpoint{
 	RopstenGenesisHash: RopstenTrustedCheckpoint,
 	RinkebyGenesisHash: RinkebyTrustedCheckpoint,
 	GoerliGenesisHash:  GoerliTrustedCheckpoint,
+	DposGenesisHash: DposTrustedCheckpoint,
 }
 
 // CheckpointOracles associates each known checkpoint oracles with the genesis hash of
@@ -199,6 +203,13 @@ var (
 		SectionHead:  common.HexToHash("0xf2d200f636f213c9c7bb4e747ff564813da7708253037103aef3d8be5203c5e1"),
 		CHTRoot:      common.HexToHash("0xb0ac83e2ccf6c2776945e099c4e3df50fe6200499c8b2045c34cafdf57d15087"),
 		BloomRoot:    common.HexToHash("0xfb580ad1c611230a4bfc56534f58bcb156d028bc6ce70e35403dc019c7c02d90"),
+	}
+	
+	DposTrustedCheckpoint = &TrustedCheckpoint{
+		SectionIndex: 1,
+		SectionHead: common.HexToHash("0xd3e704e8f6bce0df780a96eb4229d30a22e1e6dfd75d9d36ca12c25b9f231c1f"),
+		CHTRoot: common.HexToHash("0x3629fbc361f048bd68cc37184b8b2b93e4fb41d46568db6385ac6159fdbfe5df"),
+		BloomRoot: common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
 	}
 
 	// GoerliCheckpointOracle contains a set of configs for the Goerli test network oracle.

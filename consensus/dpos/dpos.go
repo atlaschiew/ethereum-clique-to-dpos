@@ -46,6 +46,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
 	lru "github.com/hashicorp/golang-lru"
+	
 )
 
 //dpos常量
@@ -163,6 +164,8 @@ type Dpos struct {
 	//以下测试用途
 	fakeDiff bool //跳过难度验证
 	
+	state *state.StateDB 
+	
 }
 
 func New(config *params.DposConfig, db ethdb.Database) *Dpos {
@@ -227,6 +230,8 @@ func(self *Dpos) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*typ
 	//开启协程，利用通道与调用者沟通
 	go func() {
 		for i, header := range headers {
+			
+			//[]headers从老块到新块排序的
 			err := self.verifyHeader(chain, header, headers[:i])
 
 			select {
@@ -245,6 +250,7 @@ func(self *Dpos) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*typ
 Dpos没有叔块的概念，如果区块存在叔块，那么就返回错误
 */
 func(self *Dpos) VerifyUncles(chain consensus.ChainReader, block *types.Block) error {
+	
 	
 	if len(block.Uncles()) != 0 {
 		return errors.New("uncle is not allow")
@@ -352,9 +358,8 @@ func (self *Dpos) verifyHeader(chain consensus.ChainHeaderReader, header *types.
 		return errInvalidTimestamp
 	}
 
-	epochHeader := self.epochOfHeader(chain, header)
+	epochHeader := self.epochOfHeader(chain, header, parents)
 	
-	//epochHeader在轻节点里可能找不到
 	if epochHeader != nil {
 		
 		//以下验证依据当前的epoch
@@ -395,6 +400,14 @@ func (self *Dpos) verifyHeader(chain consensus.ChainHeaderReader, header *types.
 		if !inturn && header.Difficulty.Cmp(diffNoTurn) != 0 {
 			return errWrongDifficultyAgainstExtra
 		} 
+	} else if !epochBlock {
+		/*
+		主要针对轻节点，如果欲验证的块是普通块，那么self.epochOfHeader(...)一定会在parents里找到epoch
+		
+		因为轻节点一定是从epoch开始同步的,参考LightChain.SyncCheckpoint(...) @ light/lightchain.go
+		
+		*/
+		return errMissingEpochBlock
 	}
 	
 	return nil
@@ -447,7 +460,7 @@ func (self *Dpos) verifySeal(chain consensus.ChainHeaderReader, header *types.He
 		return errUnauthorizedSignerAgainstSnap
 	}
 	
-	//检查签名者是否在signer limit个区块里多过一次出块
+	//检查签名者是否在signer limit个区块里多出一次块
 	for seen, recent := range snap.Recents {
 		if recent == signer {
 			// Signer is among recents, only fail if the current block doesn't shift it out
@@ -492,17 +505,134 @@ func(self *Dpos) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 	//新区块高度
 	number := header.Number.Uint64()
 	
-	//Assemble the voting snapshot to check which votes make sense
-	//取最近的snapshot
+	//如果新块不是epoch区块
+	if number%self.config.EpochInterval != 0 {
+		
+	} else {
+		//空myproposals,避免新epoch时又投旧提案
+		self.myProposals = make(map[common.Hash]bool)
+	}
+	
+	//更新正确的时间截
+	parent := chain.GetHeader(header.ParentHash, number-1)
+	if parent == nil {
+		return consensus.ErrUnknownAncestor
+	}
+	
+	//header.Time 等于 max(parent.Time + Period, now) 
+	header.Time = parent.Time + self.config.SlotInterval
+	if header.Time < uint64(time.Now().Unix()) {
+		header.Time = uint64(time.Now().Unix())
+	}
+	
+	return nil
+}
+
+/*
+实现 consensus.Engine 接口
+
+使用场景是： 
+
+1) 模拟区块链作测试用途。 GenerateChain(...) @ core/chain_makers.go
+2) 每当接收新区块时，程序在处理完全部txs后将调用。 StateProcessor.Process(...) @ core/state_processor.go
+3) 创建work的时候调用。 worker.commit(...) @ miner/worker.go
+
+*/
+func(self *Dpos) Finalize(chain consensus.ChainHeaderReader, header *types.Header, _state *state.StateDB, txs []*types.Transaction,
+		uncles []*types.Header) {
+	
+	self.state = _state
+	//读取应得的奖励
+	blockReward := FrontierBlockReward
+	
+	if chain.Config().IsByzantium(header.Number) {
+		blockReward = ByzantiumBlockReward
+	}
+	if chain.Config().IsConstantinople(header.Number) {
+		blockReward = ConstantinopleBlockReward
+	}
+	
+	//如果是下载的块，signer一定会有值
+	signer, _ := ecrecover(header, self.signatures); 
+	
+	if signer == (common.Address{}) {
+		//否则这是miner正想打造的新区块
+		signer = self.signer 
+	} 
+	
+	//把奖励发给签名者
+	toSigner := new(big.Int).Set(blockReward)
+	toSigner.Mul(toSigner, big.NewInt(signerReward))
+	toSigner.Div(toSigner, big.NewInt(100))
+	
+	_state.AddBalance(signer, toSigner)
+	
+	//把奖励发给委托人
+	toDelegators :=  new(big.Int).Set(blockReward)
+	toDelegators.Sub(toDelegators, toSigner)
+	
+	//找出入参的块头属于哪个epoch块
+	epochHeader := self.epochOfHeader(chain, header, nil)
+
+	signers, _, delegatorss := parseEpochExtra(epochHeader)
+	
+	electedDelegators :=  make(map[common.Address][]ElectedDelegator)
+	for k, delegators := range delegatorss {
+		for _, delegator := range delegators {
+			electedDelegators[signers[k]]= append(electedDelegators[signers[k]], delegator)
+		}
+	}
+	
+	totalDelegators := len(electedDelegators[signer])
+	
+	if totalDelegators > 0 {
+		//取中选的Delegators，他们是获利者 
+		for _, delegator := range electedDelegators[signer] {
+				
+			portionAmt := new(big.Float).Mul(new(big.Float).SetInt(toDelegators), big.NewFloat(float64(delegator.Portion))) 
+			
+			delegatorReward := new(big.Int)
+			portionAmt.Int(delegatorReward)
+	
+			_state.AddBalance(delegator.Delegator, delegatorReward)
+		}
+	}
+	
+	/*
+	到这里，取总TX费用的奖励怎么没看到？其实这个已发生在
+	worker.commitTransaction(...) > core.ApplyTransaction(...) > core.ApplyMessage(...) > StateTransition.TransitionDb(...)
+	*/
+	
+	/*计算world state trie并更新 header.Root*/
+	header.Root = _state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
+	
+	/*uncle不存在于Dpos*/
+	header.UncleHash = types.CalcUncleHash(nil)
+}
+
+/*
+实现 consensus.Engine 接口
+*/
+func(self *Dpos) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, _state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {
+
+	self.state = _state
+	
+	self.Finalize(chain, header, _state, txs, uncles)
+	
+	number := header.Number.Uint64()
+	/*
+	snapshot必须摆在finalize后面
+	因为计算preElected时是取epochinterval-1块的最终state,所以颁发奖励后的state才是最终的state
+	*/
 	snap, err := self.snapshot(chain, number-1, header.ParentHash, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	
 	//如果新块不是epoch区块
 	if number%self.config.EpochInterval != 0 {
 		self.lock.RLock()
-		
+			
 		validProposals := make([]common.Hash, 0, len(self.myProposals))
 		for proposalBytes, yesNo := range self.myProposals {
 			if snap.validVote(self.signer, proposalBytes, yesNo) {//投过的提案将被除外
@@ -530,23 +660,23 @@ func(self *Dpos) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 		}
 		self.lock.RUnlock()
 	}
-	
+
 	/*
 	计算难度
 	*/
 	header.Difficulty = calcDifficulty(snap, self.signer) 
-	
+
 	/*
 	处理 block.header.extra
 	*/
 	header.Extra = make([]byte,0)
-	
+
 	//初始化签名值为0x00...0
 	item := bytes.Repeat([]byte{0x00}, crypto.SignatureLength)
-	
+
 	header.Extra = append(header.Extra, VarIntToBytes(item)...)
 	header.Extra = append(header.Extra, item...)
-	
+
 	//epoch区块
 	if number%self.config.EpochInterval == 0 {
 		
@@ -591,103 +721,6 @@ func(self *Dpos) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 		
 	}
 	
-	//更新正确的时间截
-	parent := chain.GetHeader(header.ParentHash, number-1)
-	if parent == nil {
-		return consensus.ErrUnknownAncestor
-	}
-	
-	//header.Time 等于 max(parent.Time + Period, now) 
-	header.Time = parent.Time + self.config.SlotInterval
-	if header.Time < uint64(time.Now().Unix()) {
-		header.Time = uint64(time.Now().Unix())
-	}
-	
-	return nil
-}
-
-/*
-实现 consensus.Engine 接口
-
-使用场景是： 
-
-1) 模拟区块链作测试用途。 GenerateChain(...) @ core/chain_makers.go
-2) 每当接收新区块时，程序在处理完全部txs后将调用。 StateProcessor.Process(...) @ core/state_processor.go
-3) 创建work的时候调用。 worker.commit(...) @ miner/worker.go
-
-*/
-func(self *Dpos) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction,
-		uncles []*types.Header) {
-	
-	//读取应得的奖励
-	blockReward := FrontierBlockReward
-	
-	if chain.Config().IsByzantium(header.Number) {
-		blockReward = ByzantiumBlockReward
-	}
-	if chain.Config().IsConstantinople(header.Number) {
-		blockReward = ConstantinopleBlockReward
-	}
-	
-	//如果是下载的块，signer一定会有值
-	signer, _ := ecrecover(header, self.signatures); 
-	
-	if signer == (common.Address{}) {
-		//否则这是miner正想打造的新区块
-		signer = self.signer 
-	} 
-	
-	//把奖励发给签名者
-	toSigner := new(big.Int).Set(blockReward)
-	toSigner.Mul(toSigner, big.NewInt(signerReward))
-	toSigner.Div(toSigner, big.NewInt(100))
-	
-	state.AddBalance(signer, toSigner)
-	
-	//把奖励发给委托人
-	toDelegators :=  new(big.Int).Set(blockReward)
-	toDelegators.Sub(toDelegators, toSigner)
-	
-	//找出入参的块头属于哪个epoch块
-	epochHeader := self.epochOfHeader(chain, header)
-
-	signers, _, delegatorss := parseEpochExtra(epochHeader)
-	
-	electedDelegators :=  make(map[common.Address][]ElectedDelegator)
-	for k, delegators := range delegatorss {
-		for _, delegator := range delegators {
-			electedDelegators[signers[k]]= append(electedDelegators[signers[k]], delegator)
-		}
-	}
-	
-	totalDelegators := len(electedDelegators[signer])
-	
-	if totalDelegators > 0 {
-		//取中选的Delegators，他们是获利者 
-		for _, delegator := range electedDelegators[signer] {
-				
-			portionAmt := new(big.Float).Mul(new(big.Float).SetInt(toDelegators), big.NewFloat(float64(delegator.Portion))) 
-			
-			delegatorReward := new(big.Int)
-			portionAmt.Int(delegatorReward)
-	
-			state.AddBalance(delegator.Delegator, delegatorReward)
-		}
-	}
-	
-	/*计算world state trie并更新 header.Root*/
-	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
-	
-	/*uncle不存在于Dpos*/
-	header.UncleHash = types.CalcUncleHash(nil)
-}
-
-/*
-实现 consensus.Engine 接口
-*/
-func(self *Dpos) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {
-
-	self.Finalize(chain, header, state, txs, uncles)
 	
 	//返回一个未完成的区块，等待sealing(签名)
 	newBlock := types.NewBlock(header, txs, nil, receipts, new(trie.Trie))
@@ -714,20 +747,19 @@ func(self *Dpos) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 	signer, signFn := self.signer, self.signFn
 	self.lock.RUnlock()
 	
-	//再确定自己是否是合格的签名者
 	snap, err := self.snapshot(chain, number-1, header.ParentHash, nil)
 	if err != nil {
 		return err
 	}
 	
+	//再确定自己是否是合格的签名者
 	if _, authorized := snap.ElectedSigners[signer]; !authorized {
 		return errUnauthorizedSignerAgainstSnap
 	}
 	
-	//奇怪，这个snap.Recents的检查不是在dpos.Prepare()里发生过了吗
+	//检查签名者是否在signer limit个区块里多出一次块
 	for seen, recent := range snap.Recents {
 		if recent == signer {
-			// Signer is among recents, only wait if the current block doesn't shift it out
 			if limit := uint64(len(snap.ElectedSigners)/2 + 1); number < limit || seen > number-limit {
 				log.Info("Signed recently, must wait for others")
 				return nil
@@ -847,7 +879,10 @@ func(self *Dpos) Close() error {
 	return nil
 }
 
-func (self *Dpos) epochOfHeader(chain consensus.ChainHeaderReader, header *types.Header) (*types.Header) {
+func (self *Dpos) epochOfHeader(chain consensus.ChainHeaderReader, header *types.Header, _parents []*types.Header) (*types.Header) {
+	
+	var parents []*types.Header
+	copy(parents, _parents)
 	
 	number := header.Number.Uint64()
 	
@@ -861,16 +896,32 @@ func (self *Dpos) epochOfHeader(chain consensus.ChainHeaderReader, header *types
 	//向后循环直到找到epochNumber
 	searchNumber := number - 1
 	searchHash := header.ParentHash
+	
 	for searchNumber != epochNumber {
-		header := chain.GetHeader(searchHash, searchNumber)
+		
+		var header *types.Header
+		
+		if len(parents) > 0  {
+			header = parents[len(parents)-1]
+			parents = parents[:len(parents)-1]	
+		} 
+		
+		if header == nil {
+			header = chain.GetHeader(searchHash, searchNumber)
+		}
 		
 		if header == nil {
 			return nil
 		}
 		searchNumber, searchHash = searchNumber - 1, header.ParentHash
 	}
-
-	return chain.GetHeaderByHash(searchHash)
+	
+	if len(parents) > 0  {
+		header = parents[len(parents)-1]
+		return header 
+	} else {
+		return chain.GetHeaderByHash(searchHash)
+	}
 }
 
 /*
@@ -886,12 +937,10 @@ func (self *Dpos) snapshot(chain consensus.ChainHeaderReader, number uint64, has
 	for snap == nil { //一直努力寻找最近的snapshot
 	
 		//试试在内存里找
-		/*
 		if s, ok := self.recents.Get(hash); ok {
 			snap = s.(*Snapshot)
 			break
 		}
-		*/
 		
 		//试试在磁盘里找
 		if number%storeSnapInterval == 0 || (number+1)%self.config.EpochInterval == 0 {
@@ -960,7 +1009,7 @@ func (self *Dpos) snapshot(chain consensus.ChainHeaderReader, number uint64, has
 	}
 	
 	//处理投票
-	snap, err := snap.apply(chain.(consensus.ChainReader), headers, self.db) 
+	snap, err := snap.apply(chain.(consensus.ChainReader), headers, self.db, self.state) 
 	if err != nil {
 		
 		return nil, err

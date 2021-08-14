@@ -83,8 +83,6 @@ func getProposal(id uint8) (*Proposal,error) {
 	}
 }
 
-
-
 /*
 编码的值代表proposal信息并记录在block.header.mixdigest
 */

@@ -82,7 +82,7 @@ var Actions map[uint8]*Action = map[uint8]*Action{
 		ValidateBytesFn: func(_bytes []byte) (error) {
 			
 			if len(_bytes) != common.AddressLength + 1 {
-				return errors.New("Invalid proposal#" + string(_bytes[0]))
+				return errors.New("Invalid action#" + string(_bytes[0]))
 			}
 			
 			return nil
@@ -177,10 +177,6 @@ func getAction(id uint8) (*Action,error) {
 	}
 }
 
-
-/*
-编码的值代表proposal信息并记录在block.header.mixdigest
-*/
 func(self *Action) toBytes() ([]byte,error) {
 	
 	if err:=self.ValidateValuesFn(self.Id, self.Values);err!=nil {
@@ -193,9 +189,6 @@ func(self *Action) toBytes() ([]byte,error) {
 	return result,nil
 }
 
-/*
-解码block.header.mixdigest里的值成proposal对象
-*/
 func(self *Action) fromBytes(actionBytes []byte) error {
 	
 	id := actionBytes[0]	

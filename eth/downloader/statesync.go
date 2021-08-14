@@ -509,7 +509,7 @@ func (s *stateSync) fillTasks(n int, req *stateReq) (nodes []common.Hash, paths 
 func (s *stateSync) process(req *stateReq) (int, error) {
 	// Collect processing stats and update progress if valid data was received
 	duplicate, unexpected, successful := 0, 0, 0
-
+	
 	defer func(start time.Time) {
 		if duplicate > 0 || unexpected > 0 {
 			s.updateStats(0, duplicate, unexpected, time.Since(start))
@@ -518,6 +518,7 @@ func (s *stateSync) process(req *stateReq) (int, error) {
 
 	// Iterate over all the delivered data and inject one-by-one into the trie
 	for _, blob := range req.response {
+		
 		hash, err := s.processNodeData(blob)
 		switch err {
 		case nil:
@@ -535,6 +536,8 @@ func (s *stateSync) process(req *stateReq) (int, error) {
 		delete(req.trieTasks, hash)
 		delete(req.codeTasks, hash)
 	}
+	
+	
 	// Put unfulfilled tasks back into the retry queue
 	npeers := s.d.peers.Len()
 	for hash, task := range req.trieTasks {
@@ -579,6 +582,7 @@ func (s *stateSync) processNodeData(blob []byte) (common.Hash, error) {
 	s.keccak.Write(blob)
 	s.keccak.Sum(res.Hash[:0])
 	err := s.sched.Process(res)
+
 	return res.Hash, err
 }
 

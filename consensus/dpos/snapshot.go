@@ -19,23 +19,20 @@ package dpos
 import (
 	"bytes"
 	"encoding/json"
-	"encoding/binary"
 	"sort"
 	"time"
 	"fmt"
-	
 	"math/big"
-	"math/rand"
 	_ "errors"
+	
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/consensus"
-	_ "github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/state"
+	
 	lru "github.com/hashicorp/golang-lru"
 	
 )
@@ -459,7 +456,7 @@ func addressBigIntDescSorter(m map[common.Address]*big.Int) manyAddressBigIntDes
 
 // apply creates a new authorization snapshot by applying the given headers to
 // the original one.
-func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db ethdb.Database) (*Snapshot, error) {
+func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db ethdb.Database, _state *state.StateDB) (*Snapshot, error) {
 
 	// Allow passing in no headers for cleaner code
 	if len(headers) == 0 {
@@ -493,8 +490,7 @@ func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db
 		number := header.Number.Uint64()
 		
 		if number%s.config.EpochInterval == 0 {
-
-			//process kickout
+			//处理被踢者
 			for kickoutSigner := range snap.ElectedSigners {
 				_, exist := snap.PreElectedSigners[kickoutSigner]
 				
@@ -604,6 +600,7 @@ func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db
 			return nil, errMissingBody
 		} else {
 			
+			
 			txs := block.Body().Transactions
 			
 			ethSigner := types.MakeSigner(chain.Config(), new(big.Int).SetUint64(number))
@@ -634,6 +631,11 @@ func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db
 								case quitCandidate:
 									delete(snap.Candidates,from)
 									
+									for delegator, candidate := range snap.Delegators {
+										if candidate == from {
+											delete(snap.Delegators, delegator)
+										}
+									}
 								case quitDelegator:
 									delete(snap.Delegators,from)
 							}
@@ -644,11 +646,16 @@ func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db
 		}
 		
 		if (number+1)%s.config.EpochInterval == 0 {
-			fmt.Printf("")
+			
 			
 			statedb, err := state.New(header.Root, state.NewDatabase(db), nil)
-				
-			if err != nil {
+			
+			if statedb==nil {
+				statedb = _state
+			}
+			
+			if statedb == nil {
+				fmt.Println("chiew check apply", err)
 				
 				//这里针对before Pivot和Pivot之间没有state的区块 (fast-sync),虽然牵强，但为了连贯性只有为之
 				if len(headers)-1 < i + 1 {
@@ -674,7 +681,7 @@ func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db
 				//每个出块人的最低出块数，低过这个值将被开除, -1 是不包括epoch块
 				minMintTarget := (int(snap.config.EpochInterval) - 1) / len(snap.ElectedSigners) / 2
 				candidateCnt := len(snap.Candidates) - len(snap.ElectedSigners)
-				candidateCnt = 1
+				//candidateCnt = 1
 				sorted := addressIntAscSorter(snap.ElectedSigners)
 				
 				//被踢出签名者,将丧失候选人身份
@@ -694,23 +701,17 @@ func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db
 				}
 				
 				//如今 snap.Candidates都是合格的候选人， 开始竞争!
-				var exist bool
 				for delegator, candidate := range snap.Delegators {
-					_, exist = kickoutSigners[candidate]
 					
-					if exist {
+					if _, exist := kickoutSigners[candidate]; exist {
 						continue
 					}
 					
-					_, exist = kickoutSigners[delegator]
-					
-					if exist {
+					if _, exist := kickoutSigners[delegator]; exist {
 						continue
 					}
 					
-					_, exist = candidateVotes[candidate]
-					
-					if !exist {
+					if _, exist := candidateVotes[candidate]; !exist {
 						candidateVotes[candidate] = big.NewInt(0)
 					}
 					
@@ -726,14 +727,6 @@ func (s *Snapshot) apply(chain consensus.ChainReader,headers []*types.Header, db
 				
 				if len(newSigners) > maxSignerSize {
 					newSigners = newSigners[:maxSignerSize]
-				}
-				
-				epochCnt := (number+1)/s.config.EpochInterval
-				seed := int64(binary.LittleEndian.Uint32(crypto.Keccak512(header.Hash().Bytes()))) + int64(epochCnt)
-				r := rand.New(rand.NewSource(seed))
-				for i := len(newSigners) - 1; i > 0; i-- {
-					j := int(r.Int31n(int32(i + 1)))
-					newSigners[i], newSigners[j] = newSigners[j], newSigners[i]
 				}
 				
 				for _, newSigner := range newSigners {

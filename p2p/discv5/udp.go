@@ -378,8 +378,6 @@ func (t *udp) readLoop() {
 func (t *udp) handlePacket(from *net.UDPAddr, buf []byte) error {
 	pkt := ingressPacket{remoteAddr: from}
 	if err := decodePacket(buf, &pkt); err != nil {
-		
-		
 		log.Debug(fmt.Sprintf("Bad packet from %v: %v", from, err))
 		//fmt.Println("bad packet", err)
 		return err
@@ -395,8 +393,6 @@ func decodePacket(buffer []byte, pkt *ingressPacket) error {
 	buf := make([]byte, len(buffer))
 	copy(buf, buffer)
 	prefix, sig, sigdata := buf[:versionPrefixSize], buf[versionPrefixSize:headSize], buf[headSize:]
-	
-	
 	if !bytes.Equal(prefix, versionPrefix) {
 		return errBadPrefix
 	}
@@ -407,8 +403,6 @@ func decodePacket(buffer []byte, pkt *ingressPacket) error {
 	pkt.rawData = buf
 	pkt.hash = crypto.Keccak256(buf[versionPrefixSize:])
 	pkt.remoteID = fromID
-	
-	
 	switch pkt.ev = nodeEvent(sigdata[0]); pkt.ev {
 	case pingPacket:
 		pkt.data = new(ping)
@@ -431,7 +425,5 @@ func decodePacket(buffer []byte, pkt *ingressPacket) error {
 	}
 	s := rlp.NewStream(bytes.NewReader(sigdata[1:]), 0)
 	err = s.Decode(pkt.data)
-	
-	
 	return err
 }

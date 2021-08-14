@@ -114,6 +114,11 @@ web3._extend({
 			call: 'dpos_version',
 			params: 0
 		}),
+		new web3._extend.Method({
+			name: 'test',
+			call: 'dpos_test',
+			params: 1
+		}),
 	],
 	properties: [
 		new web3._extend.Property({

@@ -18,7 +18,6 @@ package dpos
 
 import (
 	"fmt"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -58,10 +57,8 @@ func (api *API) GetSnapshotAtHash(hash common.Hash) (*Snapshot, error) {
 	return api.dpos.snapshot(api.chain, header.Number.Uint64(), header.Hash(), nil)
 }
 
-// Getversion of this API set
-func (api *API) Version() string {
-	a:= api.dpos.APIs(api.chain)
-	return a[0].Version
+func (api *API) Test(hash common.Hash) *types.Header {
+	return api.chain.GetHeaderByHash(hash)	
 }
 
 // Proposals returns the current proposals the node tries to uphold and vote on.
@@ -76,16 +73,18 @@ func (api *API) Proposals() map[common.Hash]bool {
 	return proposals
 }
 
-func (api *API) Propose(value uint8, yesNo bool) {
+func (api *API) Propose(proposalBytes common.Hash, yesNo bool) error {
 	api.dpos.lock.Lock()
 	defer api.dpos.lock.Unlock()
 	
-	proposal := Proposals[TestProposal]
-	proposal.Values = append(proposal.Values, value)
+	proposal := &Proposal{}
+	if err := proposal.fromBytes(proposalBytes); err != nil {
+		return err
+	}
 	
-	hash, err:=proposal.toBytes()
-	_ = err
-	api.dpos.myProposals[hash] = yesNo
+	api.dpos.myProposals[proposalBytes] = yesNo
+	
+	return nil
 	
 }
 

@@ -24,7 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"fmt"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/core"
@@ -161,8 +161,7 @@ func (h *serverHandler) handle(p *clientPeer) error {
 	// Put this checking here, so that "non-synced" les-server peers are still allowed
 	// to keep the connection.
 	if !h.synced() {
-		fmt.Println("chiew temporary remove")
-		//p.Log().Debug("Light server not synced, rejecting peer")
+		p.Log().Debug("Light server not synced, rejecting peer")
 		//return p2p.DiscRequested
 	}
 	// Disconnect the inbound peer if it's rejected by clientPool
@@ -211,7 +210,6 @@ func (h *serverHandler) handle(p *clientPeer) error {
 // peer. The remote connection is torn down upon returning any error.
 func (h *serverHandler) handleMsg(p *clientPeer, wg *sync.WaitGroup) error {
 	// Read the next message from the remote peer, and ensure it's fully consumed
-	
 	msg, err := p.rw.ReadMsg()
 	if err != nil {
 		return err
@@ -309,8 +307,6 @@ func (h *serverHandler) handleMsg(p *clientPeer, wg *sync.WaitGroup) error {
 	}
 	switch msg.Code {
 	case GetBlockHeadersMsg:
-	
-		
 		p.Log().Trace("Received block header request")
 		if metrics.EnabledExpensive {
 			miscInHeaderPacketsMeter.Mark(1)
