@@ -6,7 +6,7 @@
 <br/>
 
 ## 目录
-* [设计思路](#design-rationale)
+* [设计思路](#设计思路)
 * [安装部署](#deployment)
 * [源码分析](#coding-study)
   * [项目结构](#project-structure)
