@@ -7,15 +7,15 @@
 
 ## 目录
 * [设计思路](#设计思路)
-* [安装部署](#deployment)
-* [源码分析](#coding-study)
-  * [项目结构](#project-structure)
-  * [出块流程](#block-production)
-  * [验证流程](#block-verification)
-  * [快照](#snapshot)
-  * [选举](#voting)
-  * [API](#api)  
-* [后语](#ps) 
+* [安装部署](#安装部署)
+* [源码分析](#源码分析)
+  * [项目结构](#项目结构)
+  * [出块流程](#出块流程)
+  * [验证流程](#验证流程)
+  * [快照](#快照)
+  * [选举](#选举)
+  * [API](#API)  
+* [后语](#后语) 
 
 ## 设计思路
 > 本项目采用 [geth v1.9.25](https://github.com/ethereum/go-ethereum/tree/v1.9.25) 。
