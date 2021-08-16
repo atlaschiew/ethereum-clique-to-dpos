@@ -858,7 +858,7 @@ type API struct {
 	Namespace string      //命名空间, 可以通过dpos.xxx访问
 	Version   string      //版本
 	Service   interface{} //dpos API对象
-	Public    bool        //是否提供给外部接入?如果是false,那么只是console里可以调用
+	Public    bool        //如果节点没有加上 --http.api "eth,web3,debug,personal,dpos,les" 就启动, 那么这个API是无法被外部调用的。
 }
 */
 func(self *Dpos) APIs(chain consensus.ChainHeaderReader) []rpc.API {

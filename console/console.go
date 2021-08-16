@@ -198,6 +198,8 @@ func (c *Console) initExtensions() error {
 		}
 		aliases[api] = struct{}{}
 		if file, ok := web3ext.Modules[api]; ok {
+			
+			fmt.Println("chiew check compile js file", api+".js")
 			if err = c.jsre.Compile(api+".js", file); err != nil {
 				return fmt.Errorf("%s.js: %v", api, err)
 			}
