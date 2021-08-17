@@ -374,7 +374,7 @@ type Engine interface {
 
 `lightchain.InsertHeaderChain(...)`。由于轻节点的块不包括body和state，所以验证DPOS块的基本流程只是 engine.VerifyHeaders(...) -> engine.VerifyHeader(...)。 
 
-### 快照 (snapshot)
+### 快照
 调用者可以通过snapshot方法获取不同块高度时的快照状态, 主要两个应用场景 1)出块 和 2) 验块。关于snapshot结构体，读者可以通过源码了解，这里就不再发布。
 
 想获取snapshot,go环境下就调用dpos.snapshot(...)，console环境下则调用dpos.getSnapshot(...)。
