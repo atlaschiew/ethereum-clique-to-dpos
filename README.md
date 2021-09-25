@@ -148,7 +148,7 @@ $ ~/dpos/build/bin/geth --datadir ~/db_dpos/db1 init ~/db_dpos/genesis.json
 $ ~/dpos/build/bin/geth --datadir ~/db_dpos/db2 init ~/db_dpos/genesis.json
 $ ~/dpos/build/bin/geth --datadir ~/db_dpos/db3 init ~/db_dpos/genesis.json
 ```
-8. 我了方便测试，在每个db文件夹创建各自的static-nodes.json
+8. 为了方便测试，在每个db文件夹创建各自的static-nodes.json
 ```sh
 echo '["enode://9da6efb2edf2e77b5f66d147ef6698dab5edfcb84fbe4e31763485a5d6d9195c2ec7e6a9c864b0f0a1b018e954f357c7b15b7111eb48638d5a241a640fa0b728@127.0.0.1:30304","enode://f83ea46ee46d388e2cc6844a05b50a0cf10c14161e7b596287ab34f7e7e47b078724a0d403e2140823a90d4461236cfd431813ec18ff4908764e045b3245f834@127.0.0.1:30305"]' > ~/db_dpos/db1/static-nodes.json
 
@@ -426,7 +426,7 @@ type Engine interface {
 触发它们的方法是把想要的action对象编成bytes并写入tx.data (txdata.Payload)，然后发送tx到0x0000000000000000000000000000000000000001这个特殊的地址。当snapshot.apply(...)取得block.Body().Transactions就会处理这4种特殊的tx。
 
 选新签名者的过程，以下的变量都在snapshot.apply(...)
-1. `minMintTarget` 表示最低需要达到的出块数，否则当前签名者将被提出。
+1. `minMintTarget` 表示最低需要达到的出块数，否则当前签名者将被踢出。
 2. `candidateCnt` 表示可用候选人。
 3. 根据出块数从少到多排序当前多签名者，如果还有可用候选人AND不达标的签名者放入`kickoutSigners`里, 否则放入`candidateVotes`里。candidateVotes里的人表示有资格可以竞选成新签名者。
 4. `candidateVotes[candidate].Add(candidateVotes[candidate],balance)` 累计每个候选人的得票。得票的概念其实是依据委托人的balance。假设一名候选人只有一名委托人并且该名委托人的balance是个大数目，相较于另一名候选人有多名委托人，但累计起来的balance只是个小数目，那么结果是前者更占优势。
